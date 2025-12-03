@@ -9,23 +9,39 @@ Extracts information about variables including addresses, data types and sizes.
 
 Author: Uneld
 Date: 28.11.2025
-Version: 1.0
+Version: 1.2
 License: MIT
 """
 
-
 from elftools.elf.elffile import ELFFile
+import os
+
+
+class ElfParsingError(Exception):
+    """Базовое исключение для ошибок парсинга ELF"""
+    pass
+
 
 class BssInspector:
-    def __init__(self, elf_file):
-        self.elf_file = elf_file
+    def __init__(self, progress_callback=None):
+        """
+        Инициализация инспектора BSS
+
+        Args:
+            progress_callback: функция обратного вызова для прогресса (принимает значение 0-100)
+        """
+        self.elf_file = None
         self.var_library = {}
-        self.pointer_size = 0  # установим при collect_bss_vars
-        self.simple_types = {
-            'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
-            'int8_t', 'int16_t', 'int32_t', 'int64_t',
-            'float', 'double', 'long double', 'bool', 'char', 'pointer'
-        }
+        self.pointer_size = 0
+        self.seen_addresses = set()
+        self.forbidden_types = {
+            'unknown', 'array of compound', 'pointer', 'array of pointer', 'pointer'}
+        self.progress_callback = progress_callback
+
+    def _update_progress(self, value):
+        """Обновление прогресса через callback"""
+        if self.progress_callback and callable(self.progress_callback):
+            self.progress_callback(value)
 
     # ---------- Типы ----------
 
@@ -89,7 +105,7 @@ class BssInspector:
     def unwrap_qualifiers(self, dwarf_info, type_die, cu_offset):
         # Снимаем volatile/const/restrict/typedef рекурсивно
         while type_die and type_die.tag in (
-            'DW_TAG_volatile_type', 'DW_TAG_const_type', 'DW_TAG_restrict_type', 'DW_TAG_typedef'
+                'DW_TAG_volatile_type', 'DW_TAG_const_type', 'DW_TAG_restrict_type', 'DW_TAG_typedef'
         ):
             at_type = type_die.attributes.get('DW_AT_type')
             if not at_type:
@@ -122,7 +138,7 @@ class BssInspector:
             size_attr = type_die.attributes.get('DW_AT_byte_size')
             size = size_attr.value if size_attr else 0
             # Имя enum часто как typedef; показываем как uintX по размеру
-            name = {1:"int8_t",2:"int16_t",4:"int32_t",8:"int64_t"}.get(size, "int32_t")
+            name = {1: "int8_t", 2: "int16_t", 4: "int32_t", 8: "int64_t"}.get(size, "int32_t")
             return name, size, type_die, "simple"
 
         if tag == 'DW_TAG_pointer_type':
@@ -183,14 +199,18 @@ class BssInspector:
                 # Конечный (простой/указатель/массив/enum/базовый)
                 size = type_size
                 # Если размер не найден (0), но это указатель — подставим pointer_size
-                if size == 0 and type_name == "pointer":
-                    size = self.pointer_size or 0
+                if type_name not in self.forbidden_types and address not in self.seen_addresses:
 
-                self.var_library[full_name] = {
-                    'address': address,
-                    'type': type_name,
-                    'size': size
-                }
+                    self.seen_addresses.add(address)
+
+                    if size is None:
+                        size = 0
+
+                    self.var_library[full_name] = {
+                        'address': address,
+                        'type': type_name,
+                        'size': size
+                    }
 
     # ---------- Определение типа переменной ----------
 
@@ -224,73 +244,165 @@ class BssInspector:
 
     # ---------- Сбор переменных из .bss ----------
 
-    def collect_bss_vars(self):
-        self.var_library = {}
-        with open(self.elf_file, 'rb') as f:
-            elffile = ELFFile(f)
+    def collect_bss_vars(self, elf_file):
+        """
+        Сбор переменных из секции .bss с отслеживанием прогресса
 
-            # Размер указателя по ELF (32/64)
-            self.pointer_size = elffile.elfclass // 8
+        Args:
+            elf_file: путь к ELF файлу для анализа
 
-            if not elffile.has_dwarf_info():
-                print("Файл не содержит DWARF-информации!")
-                return
+        Returns:
+            dict: словарь с найденными переменными
 
-            dwarf_info = elffile.get_dwarf_info()
-            sym_tab = elffile.get_section_by_name('.symtab')
-            if not sym_tab:
-                print("Таблица символов .symtab не найдена!")
-                return
+        Raises:
+            FileNotFoundError: если файл не существует
+            ElfParsingError: если возникла ошибка парсинга
+        """
+        try:
+            # Сброс состояния перед новым парсингом
+            self.elf_file = elf_file
+            self.var_library = {}
+            self.seen_addresses = set()
+            self.pointer_size = 0
 
-            for symbol in sym_tab.iter_symbols():
-                if (
-                    symbol.entry['st_shndx'] == 'SHN_UNDEF' or
-                    not symbol.name or
-                    symbol.entry['st_size'] == 0
-                ):
-                    continue
-                section = elffile.get_section(symbol.entry['st_shndx'])
-                if section.name != '.bss':
-                    continue
+            self._update_progress(0)
 
-                symbol_address = symbol.entry.get('st_value')
-                if symbol_address is None:
-                    continue
+            # Проверка существования файла
+            if not os.path.exists(elf_file):
+                raise FileNotFoundError(f"ELF файл не найден: {elf_file}")
 
-                var_type = self.get_variable_type(dwarf_info, symbol.name, symbol_address)
-                if var_type == "unknown":
-                    continue
+            with open(elf_file, 'rb') as f:
+                elffile = ELFFile(f)
+                self._update_progress(5)
 
-                # Если это compound — его поля уже положены в var_library внутри get_variable_type
-                if isinstance(var_type, dict):
-                    continue
+                # Размер указателя по ELF (32/64)
+                self.pointer_size = elffile.elfclass // 8
 
-                # Иначе — простая переменная, положим напрямую
-                # Попробуем оценить размер через тип: создадим DIE повторно
-                # (для простых типов size может быть в типе)
-                # Если тип 'pointer' — используем self.pointer_size
-                size = symbol.entry['st_size']
-                if var_type == "pointer" and (size == 0 or size is None):
-                    size = self.pointer_size or 0
+                if not elffile.has_dwarf_info():
+                    raise ElfParsingError("Файл не содержит DWARF-информации!")
 
-                self.var_library[symbol.name] = {
-                    'address': symbol_address,
-                    'type': var_type,
-                    'size': size
-                }
+                dwarf_info = elffile.get_dwarf_info()
+                self._update_progress(10)
+
+                sym_tab = elffile.get_section_by_name('.symtab')
+                if not sym_tab:
+                    raise ElfParsingError("Таблица символов .symtab не найдена!")
+
+                # Получаем общее количество символов для прогресса
+                symbols = list(sym_tab.iter_symbols())
+                total_symbols = len(symbols)
+
+                if total_symbols == 0:
+                    self._update_progress(100)
+                    return self.var_library
+
+                processed_symbols = 0
+
+                for symbol in symbols:
+                    processed_symbols += 1
+
+                    # Обновляем прогресс
+                    if processed_symbols % 10 == 0 or processed_symbols == total_symbols:
+                        progress = 10 + (processed_symbols / total_symbols * 80)
+                        self._update_progress(min(90, int(progress)))
+
+                    if (
+                            symbol.entry['st_shndx'] == 'SHN_UNDEF' or
+                            not symbol.name or
+                            symbol.entry['st_size'] == 0
+                    ):
+                        continue
+
+                    section = elffile.get_section(symbol.entry['st_shndx'])
+                    if section.name != '.bss':
+                        continue
+
+                    symbol_address = symbol.entry.get('st_value')
+                    if symbol_address is None:
+                        continue
+
+                    var_type = self.get_variable_type(dwarf_info, symbol.name, symbol_address)
+                    # Если это compound — его поля уже положены в var_library внутри get_variable_type
+                    if isinstance(var_type,
+                                  dict) or var_type in self.forbidden_types or symbol_address in self.seen_addresses:
+                        continue
+
+                    # Иначе — простая переменная, положим напрямую
+                    size = symbol.entry['st_size']
+                    if size is None:
+                        size = 0
+
+                    self.seen_addresses.add(symbol_address)
+
+                    self.var_library[symbol.name] = {
+                        'address': symbol_address,
+                        'type': var_type,
+                        'size': size
+                    }
+
+                self._update_progress(100)
+                return self.var_library
+
+        except FileNotFoundError:
+            raise
+        except ElfParsingError:
+            raise
+        except Exception as e:
+            raise ElfParsingError(f"Ошибка при парсинге ELF файла: {str(e)}")
 
     # ---------- Вывод ----------
 
     def print_table(self):
+        """Вывод таблицы переменных в консоль"""
         if not self.var_library:
             print("Нет данных о переменных в .bss!")
             return
 
-        for name, info in sorted(self.var_library.items(), key=lambda kv: kv[1]['address']):
-            print(f"var: {name} {info}")
+        # for name, info in sorted(self.var_library.items(), key=lambda kv: kv[1]['address']):
+        for name, info in self.var_library.items():
+            print(f"var: {name} {info}, hex_adr: {hex(info['address'])}")
+
+    def get_variables(self):
+        """Получение словаря переменных"""
+        return self.var_library
+
+    def clear(self):
+        """Очистка состояния инспектора"""
+        self.elf_file = None
+        self.var_library = {}
+        self.pointer_size = 0
+        self.seen_addresses = set()
 
 
 if __name__ == "__main__":
-    inspector = BssInspector("test_data.elf")
-    inspector.collect_bss_vars()
-    inspector.print_table()
+    # Пример использования с обработкой ошибок
+    try:
+        inspector = BssInspector()
+
+
+        # Демонстрация прогресса
+        def progress_callback(value):
+            print(f"Прогресс: {value}%")
+
+
+        inspector.progress_callback = progress_callback
+
+        # Парсинг файла
+        variables = inspector.collect_bss_vars("test_data.elf")
+
+        for name, info in variables.items():
+            print(f"var: {name} {info}, hex_adr: {hex(info['address'])}")
+
+        # # Вывод результатов
+        # inspector.print_table()
+
+        # Можно распарсить другой файл без создания нового инспектора
+        # inspector.clear()
+        # variables2 = inspector.collect_bss_vars("another_file.elf")
+
+    except FileNotFoundError as e:
+        print(f"Ошибка: {e}")
+    except ElfParsingError as e:
+        print(f"Ошибка парсинга: {e}")
+    except Exception as e:
+        print(f"Неожиданная ошибка: {e}")
