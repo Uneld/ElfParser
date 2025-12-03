@@ -9,7 +9,7 @@ Extracts information about variables including addresses, data types and sizes.
 
 Author: Uneld
 Date: 28.11.2025
-Version: 1.2
+Version: 1.3
 License: MIT
 """
 
@@ -35,7 +35,12 @@ class BssInspector:
         self.pointer_size = 0
         self.seen_addresses = set()
         self.forbidden_types = {
-            'unknown', 'array of compound', 'pointer', 'array of pointer', 'pointer'}
+            'array of unknown', 'unknown',
+            'array of compound', 'compound',
+            'array of pointer', 'pointer',
+            'array of unknown_type', 'unknown_type',
+            'array of complex', 'complex',
+            'struct/class', }
         self.progress_callback = progress_callback
 
     def _update_progress(self, value):
@@ -114,6 +119,37 @@ class BssInspector:
             type_die = dwarf_info.get_DIE_from_refaddr(ref)
         return type_die
 
+    def get_array_size(self, array_die, dwarf_info, cu_offset):
+        """
+        Вычисляет размер массива в байтах на основе поддиапазонов.
+        """
+        total_elements = 1
+        element_size = 0
+
+        # Получаем тип элемента массива
+        at_type = array_die.attributes.get('DW_AT_type')
+        if at_type:
+            elem_die = dwarf_info.get_DIE_from_refaddr(at_type.value + cu_offset)
+            _, elem_size, _, _ = self.resolve_type(dwarf_info, elem_die, cu_offset)
+            element_size = elem_size
+
+        # Ищем поддиапазоны (DW_TAG_subrange_type)
+        for child in array_die.iter_children():
+            if child.tag == 'DW_TAG_subrange_type':
+                # Получаем количество элементов
+                count_attr = child.attributes.get('DW_AT_count')
+                upper_bound_attr = child.attributes.get('DW_AT_upper_bound')
+
+                if count_attr:
+                    total_elements *= count_attr.value
+                elif upper_bound_attr:
+                    # Если указана верхняя граница, нужно также получить нижнюю
+                    lower_bound_attr = child.attributes.get('DW_AT_lower_bound')
+                    lower_bound = lower_bound_attr.value if lower_bound_attr else 0
+                    total_elements *= (upper_bound_attr.value - lower_bound + 1)
+
+        return total_elements * element_size if element_size > 0 else 0
+
     def resolve_type(self, dwarf_info, type_die, cu_offset):
         """
         Возвращает (тип_строкой, размер_в_байтах, final_die, kind)
@@ -152,12 +188,16 @@ class BssInspector:
                 elem_die = dwarf_info.get_DIE_from_refaddr(at_type.value + cu_offset)
                 elem_name, elem_size, _, kind = self.resolve_type(dwarf_info, elem_die, cu_offset)
                 name = f"array of {elem_name}"
-                # Общий размер массива без поддиапазонов посчитать сложно; оставим 0
-                return name, 0, type_die, "array"
+                # Вычисляем размер массива
+                array_size = self.get_array_size(type_die, dwarf_info, cu_offset)
+                return name, array_size, type_die, "array"
             return "array", 0, type_die, "array"
 
         if tag in ('DW_TAG_structure_type', 'DW_TAG_class_type'):
-            return "compound", 0, type_die, "compound"
+            # Для структур/классов получаем общий размер
+            size_attr = type_die.attributes.get('DW_AT_byte_size')
+            size = size_attr.value if size_attr else 0
+            return "compound", size, type_die, "compound"
 
         # Fallback — попробуем DW_AT_byte_size
         size_attr = type_die.attributes.get('DW_AT_byte_size')
@@ -214,7 +254,11 @@ class BssInspector:
 
     # ---------- Определение типа переменной ----------
 
-    def get_variable_type(self, dwarf_info, variable_name, symbol_address):
+    def get_variable_type(self, dwarf_info, variable_name, symbol_address, symbol_size):
+        """
+        Определяет тип переменной и собирает информацию о ней.
+        symbol_size используется для переменных без DWARF информации о размере.
+        """
         for CU in dwarf_info.iter_CUs():
             for die in CU.iter_DIEs():
                 if die.tag != 'DW_TAG_variable':
@@ -228,19 +272,24 @@ class BssInspector:
                 # Тип переменной
                 at_type = die.attributes.get('DW_AT_type')
                 if not at_type:
-                    return "unknown"
+                    return "unknown", symbol_size
+
                 type_die = dwarf_info.get_DIE_from_refaddr(at_type.value + CU.cu_offset)
 
                 # Разрешаем тип и решаем, compound ли он
-                type_name, _, final_die, kind = self.resolve_type(dwarf_info, type_die, CU.cu_offset)
+                type_name, type_size, final_die, kind = self.resolve_type(dwarf_info, type_die, CU.cu_offset)
 
                 if kind == "compound":
                     # Собираем рекурсивно все конечные поля
                     self.collect_compound_members(dwarf_info, final_die, CU.cu_offset, symbol_address, variable_name)
-                    return {'members': 'compound'}  # маркер, что поля уже добавлены напрямую
+                    return {'members': 'compound'}, type_size
                 else:
-                    return type_name
-        return "unknown"
+                    # Если размер из DWARF равен 0, используем symbol_size
+                    if type_size == 0 and symbol_size > 0:
+                        type_size = symbol_size
+                    return type_name, type_size
+
+        return "unknown", symbol_size
 
     # ---------- Сбор переменных из .bss ----------
 
@@ -321,23 +370,35 @@ class BssInspector:
                     if symbol_address is None:
                         continue
 
-                    var_type = self.get_variable_type(dwarf_info, symbol.name, symbol_address)
+                    symbol_size = symbol.entry['st_size']
+
+                    var_type, var_size = self.get_variable_type(dwarf_info, symbol.name, symbol_address, symbol_size)
+
                     # Если это compound — его поля уже положены в var_library внутри get_variable_type
-                    if isinstance(var_type,
-                                  dict) or var_type in self.forbidden_types or symbol_address in self.seen_addresses:
+                    if isinstance(var_type, dict):
+                        # # Для структур/классов можем также сохранить общую информацию
+                        # if symbol_address not in self.seen_addresses:
+                        #     self.seen_addresses.add(symbol_address)
+                        #     self.var_library[symbol.name] = {
+                        #         'address': symbol_address,
+                        #         'type': 'struct/class',
+                        #         'size': var_size
+                        #     }
+                        continue
+
+                    if var_type in self.forbidden_types or symbol_address in self.seen_addresses:
                         continue
 
                     # Иначе — простая переменная, положим напрямую
-                    size = symbol.entry['st_size']
-                    if size is None:
-                        size = 0
+                    if var_size == 0 and symbol_size > 0:
+                        var_size = symbol_size
 
                     self.seen_addresses.add(symbol_address)
 
                     self.var_library[symbol.name] = {
                         'address': symbol_address,
                         'type': var_type,
-                        'size': size
+                        'size': var_size
                     }
 
                 self._update_progress(100)
@@ -358,8 +419,10 @@ class BssInspector:
             print("Нет данных о переменных в .bss!")
             return
 
-        # for name, info in sorted(self.var_library.items(), key=lambda kv: kv[1]['address']):
-        for name, info in self.var_library.items():
+        # Сортируем по адресу
+        sorted_vars = sorted(self.var_library.items(), key=lambda kv: kv[1]['address'])
+
+        for name, info in sorted_vars:
             print(f"var: {name} {info}, hex_adr: {hex(info['address'])}")
 
     def get_variables(self):
@@ -390,15 +453,8 @@ if __name__ == "__main__":
         # Парсинг файла
         variables = inspector.collect_bss_vars("test_data.elf")
 
-        for name, info in variables.items():
-            print(f"var: {name} {info}, hex_adr: {hex(info['address'])}")
-
-        # # Вывод результатов
-        # inspector.print_table()
-
-        # Можно распарсить другой файл без создания нового инспектора
-        # inspector.clear()
-        # variables2 = inspector.collect_bss_vars("another_file.elf")
+        # Вывод результатов
+        inspector.print_table()
 
     except FileNotFoundError as e:
         print(f"Ошибка: {e}")
