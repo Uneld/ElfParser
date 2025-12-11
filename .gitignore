@@ -3,4 +3,5 @@
 /build/
 /dist/
 *.exe
+!arm-none-eabi-c++filt.exe
 *.elf
