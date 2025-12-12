@@ -44,11 +44,11 @@ class BssInspector:
             "int8_t": True,
             "int16_t": True,
             "int32_t": True,
-            "int64_t": True,
+            #"int64_t": True,
             "uint8_t": True,
             "uint16_t": True,
             "uint32_t": True,
-            "uint64_t": True,
+            #"uint64_t": True,
 
             # char / bool
             "char": True,
@@ -58,32 +58,32 @@ class BssInspector:
 
             # вещественные
             "float": True,
-            "double": True,
-            "long double": True,
+            #"double": True,
+            #"long double": True,
 
             # указатели на примитивы
-            "pointer to int8_t": True,
-            "pointer to int16_t": True,
-            "pointer to int32_t": True,
-            "pointer to int64_t": True,
-            "pointer to uint8_t": True,
-            "pointer to uint16_t": True,
-            "pointer to uint32_t": True,
-            "pointer to uint64_t": True,
-            "pointer to float": True,
-            "pointer to double": True,
+            #"pointer to int8_t": True,
+            #"pointer to int16_t": True,
+            #"pointer to int32_t": True,
+            #"pointer to int64_t": True,
+            #"pointer to uint8_t": True,
+            #"pointer to uint16_t": True,
+            #"pointer to uint32_t": True,
+            #"pointer to uint64_t": True,
+            #"pointer to float": True,
+            #"pointer to double": True,
 
             # массивы примитивов
             "array of int8_t": True,
             "array of int16_t": True,
             "array of int32_t": True,
-            "array of int64_t": True,
+            #"array of int64_t": True,
             "array of uint8_t": True,
             "array of uint16_t": True,
             "array of uint32_t": True,
-            "array of uint64_t": True,
+            #"array of uint64_t": True,
             "array of float": True,
-            "array of double": True,
+            #"array of double": True,
         }
         self.progress_callback = elf_progress_callback
 
