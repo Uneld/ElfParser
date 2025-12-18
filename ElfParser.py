@@ -100,8 +100,9 @@ class BssInspector:
 
     @staticmethod
     def _resolve_local_demangler() -> str:
-        script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-        return os.path.join(script_dir, "arm-none-eabi-c++filt.exe")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        bin_dir = os.path.join(base_dir, "..", "bin")
+        return os.path.join(bin_dir, "arm-none-eabi-c++filt.exe")
 
     @staticmethod
     def _is_forward_declaration(die):
@@ -148,25 +149,36 @@ class BssInspector:
         cached = self._demangle_cache.get(name)
         if cached is not None:
             return cached
+
         if not os.path.exists(self._demangler_path):
             if not self._demangle_warned:
-                print("[WARN] arm-none-eabi-c++filt.exe не найден рядом со скриптом; возвращаю исходные имена.",
+                print("[WARN] arm-none-eabi-c++filt.exe не найден; возвращаю исходные имена.",
                       file=sys.stderr)
                 self._demangle_warned = True
             self._demangle_cache[name] = name
             return name
+
         try:
-            proc = subprocess.run([self._demangler_path, name],
-                                  capture_output=True, text=True, timeout=2.0)
+            proc = subprocess.run(
+                [self._demangler_path, name],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW  # 👉 убираем моргание окон
+            )
             out = (proc.stdout or "").strip()
             result = out if (proc.returncode == 0 and out) else name
             self._demangle_cache[name] = result
             return result
+        except subprocess.TimeoutExpired:
+            self._demangle_cache[name] = name
+            return name
         except Exception:
             self._demangle_cache[name] = name
             return name
 
-    # ---------- Нормализация имён ----------
+            # ---------- Нормализация имён ----------
 
     def _norm_short(self, name: str) -> str:
         """Короткий нормализованный ключ типа: демангл, хвост без namespace, lower."""
