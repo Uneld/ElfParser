@@ -1,0 +1,26 @@
+{% set groups = {
+  "feat": "✨ Новая фича",
+  "fix": "🐞 Исправления",
+  "docs": "📚 Документация",
+  "refactor": "♻️ Рефакторинг",
+  "perf": "⚡ Производительность",
+  "test": "🧪 Тесты",
+  "chore": "🔧 Прочее",
+  "ci": "🛠 CI/CD",
+  "build": "🏗 Сборка"
+} %}
+
+{% for entry in tree %}
+
+## Версия {{ entry.version }}{% if entry.date %} ({{ entry.date }}){% endif %}
+{% for change_key, changes in entry.changes.items() %}
+{% if change_key %} {% set key = (change_key)|lower %} 
+{% set title = groups.get(key) %}
+### {{ title }}
+{% for change in changes %}
+- {{key}}{% if change.scope %}({{ change.scope }}){% endif %}: {{ change.message }} ({{change.sha1[:7]}}) ({{change.author}})
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+{% endfor %}
