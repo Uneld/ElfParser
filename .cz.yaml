@@ -1,7 +1,10 @@
+---
 commitizen:
+  bump_message: "bump: \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0430 \u0432\
+    \u0435\u0440\u0441\u0438\u044F $current_version \u2192 $new_version\n\n\u041E\u0431\
+    \u043D\u043E\u0432\u043B\u0451\u043D CHANGELOG.md"
   name: cz_conventional_commits
   tag_format: v$version
   update_changelog_on_bump: true
-  version: 0.0.0
+  version: 0.0.1
   version_scheme: semver
-  bump_message: "bump: обновлена версия $current_version → $new_version\n\nОбновлён CHANGELOG.md"
