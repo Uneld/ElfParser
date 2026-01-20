@@ -1,6 +1,12 @@
+# 🇷🇺 Русская версия
+
 ## Описание
 
-`BssInspector` - это Python-класс для анализа секции `.bss` в ELF-файлах с поддержкой DWARF-отладочной информации. Класс позволяет извлекать информацию о неинициализированных переменных, включая их адреса, типы данных и размеры.
+`BssInspector` - это Python-класс для анализа секции `.bss` в ELF-файлах с поддержкой DWARF-отладочной информации. Класс позволяет извлекать информацию о неинициализированных переменных, включая их:
+- адреса
+- типы данных
+- размеры
+- вложенные структуры и массивы
 
 ## Основные возможности
 
@@ -37,6 +43,57 @@ inspector.print_table()
 ```
 
 ## Пример вывода
+
+```
+var: global_var {'address': 536871436, 'type': 'uint32_t', 'size': 4}
+var: struct_instance.member1 {'address': 536871440, 'type': 'int16_t', 'size': 2}
+var: struct_instance.member2 {'address': 536871442, 'type': 'pointer', 'size': 4}
+```
+
+***
+# 🇬🇧 English
+## Description
+`BssInspector` is a Python class designed for analyzing the `.bss` section of ELF files with support for DWARF debugging information.
+It extracts detailed information about uninitialized variables, including:
+
+- addresses
+- data types
+- sizes
+- nested structures and arrays
+
+## Key Features
+- Analysis of variables located in the .bss section of ELF files
+- Support for various data types (primitive types, pointers, arrays, structures)
+- Recursive parsing of composite types (struct / class)
+- Automatic detection of pointer size based on ELF architecture (32/64‑bit)
+- Formatted and readable output of collected data
+
+## Requirements
+- Python 3.x
+- `pyelftools` library
+
+## Installing Dependencies
+
+```bash
+pip install pyelftools
+```
+
+## Usage Example
+
+```python
+from ElfParser import BssInspector
+
+# Create an inspector for the ELF file
+inspector = BssInspector("your_file.elf")
+
+# Collect information about variables in the .bss section
+inspector.collect_bss_vars()
+
+# Print formatted results
+inspector.print_table()
+```
+
+## Sample Output
 
 ```
 var: global_var {'address': 536871436, 'type': 'uint32_t', 'size': 4}
