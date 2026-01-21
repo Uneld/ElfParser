@@ -101,7 +101,7 @@ class BssInspector:
     @staticmethod
     def _resolve_local_demangler() -> str:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        bin_dir = os.path.join(base_dir, "..", "bin")
+        bin_dir = os.path.join(base_dir, "bin")
         return os.path.join(bin_dir, "arm-none-eabi-c++filt.exe")
 
     @staticmethod
@@ -152,7 +152,7 @@ class BssInspector:
 
         if not os.path.exists(self._demangler_path):
             if not self._demangle_warned:
-                print("[WARN] arm-none-eabi-c++filt.exe не найден; возвращаю исходные имена.",
+                print(f"[WARN] arm-none-eabi-c++filt.exe не найден; возвращаю исходные имена. {self._demangler_path}",
                       file=sys.stderr)
                 self._demangle_warned = True
             self._demangle_cache[name] = name
