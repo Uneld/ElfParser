@@ -1,6 +1,7 @@
 LICENSE.txt
 README.md
 pyproject.toml
+setup.py
 elfparser/__init__.py
 elfparser/parser.py
 elfparser.egg-info/PKG-INFO
@@ -8,3 +9,4 @@ elfparser.egg-info/SOURCES.txt
 elfparser.egg-info/dependency_links.txt
 elfparser.egg-info/requires.txt
 elfparser.egg-info/top_level.txt
+elfparser/bin/arm-none-eabi-c++filt.exe
