@@ -663,7 +663,7 @@ class BssInspector:
                             continue
 
                         section = elffile.get_section(symbol.entry['st_shndx'])
-                        if section.name != '.bss':
+                        if section.name not in ('.bss', '.data'):
                             continue
 
                         symbol_address = symbol.entry.get('st_value')
@@ -732,8 +732,12 @@ class BssInspector:
             print("Нет данных о переменных в .bss!")
             return
         sorted_vars = sorted(self.var_library.items(), key=lambda kv: kv[1]['address'])
+        count = 0
         for name, info in sorted_vars:
             print(f"{name} {info}, hex_adr: {hex(info['address'])}")
+            count+=1
+        print(f"All variables: {count}")
+
 
     def get_variables(self):
         return self.var_library
