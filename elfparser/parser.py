@@ -532,14 +532,14 @@ class BssInspector:
                                                                        element_prefix)
 
                                     # Добавляем сам массив как переменную
-                                    key = (full_name, address)
-                                    if key not in self.seen_addresses:
-                                        self.seen_addresses.add(key)
-                                        self.var_library[full_name] = {
-                                            'address': address,
-                                            'type': f"array of {elem_type_name}",
-                                            'size': array_size
-                                        }
+                                    # key = (full_name, address)
+                                    # if key not in self.seen_addresses:
+                                    #     self.seen_addresses.add(key)
+                                    #     self.var_library[full_name] = {
+                                    #         'address': address,
+                                    #         'type': f"array of {elem_type_name}",
+                                    #         'size': array_size
+                                    #     }
                                     continue
 
                 # ===== СУЩЕСТВУЮЩАЯ ЛОГИКА =====
@@ -869,19 +869,19 @@ class BssInspector:
                                 if elem_size > 0 and symbol_size > 0:
                                     num_elements = symbol_size // elem_size
 
-                                    # Сохраняем информацию о массиве
-                                    key = (demangled_name, symbol_address)
-                                    if key not in self.seen_addresses:
-                                        self.seen_addresses.add(key)
-                                        self.var_library[demangled_name] = {
-                                            'address': symbol_address,
-                                            'type': var_type,
-                                            'size': symbol_size,
-                                            'is_array': True,
-                                            'element_type': elem_type_name,
-                                            'element_size': elem_size,
-                                            'num_elements': num_elements
-                                        }
+                                    # # Сохраняем информацию о массиве
+                                    # key = (demangled_name, symbol_address)
+                                    # if key not in self.seen_addresses:
+                                    #     self.seen_addresses.add(key)
+                                    #     self.var_library[demangled_name] = {
+                                    #         'address': symbol_address,
+                                    #         'type': var_type,
+                                    #         'size': symbol_size,
+                                    #         'is_array': True,
+                                    #         'element_type': elem_type_name,
+                                    #         'element_size': elem_size,
+                                    #         'num_elements': num_elements
+                                    #     }
 
                                     # Разворачиваем каждый элемент массива
                                     for i in range(num_elements):
@@ -907,20 +907,17 @@ class BssInspector:
 
                         # ===== СУЩЕСТВУЮЩАЯ ЛОГИКА ДЛЯ СТРУКТУР =====
                         if var_type not in self.permission_types:
-                            # Проверяем, не является ли это структурой/объединением
-                            if kind in ("compound", "union"):
-                                # Это структура или объединение - разрешаем
-                                pass
-                            else:
-                                # Проверяем, не является ли это массивом структур
-                                if kind == "array" and "array of " in var_type:
-                                    elem_type_name = var_type[9:]
-                                    if self._find_complete_type_die(dwarf_info, elem_type_name):
-                                        pass
-                                    else:
-                                        continue
-                                else:
+                            # Проверяем, не является ли это массивом структур (который мы уже развернули)
+                            if kind == "array" and "array of " in var_type:
+                                elem_type_name = var_type[9:]
+                                if self._find_complete_type_die(dwarf_info, elem_type_name):
+                                    # Это массив структур - пропускаем, так как уже развернули
                                     continue
+                            # Проверяем структуры/объединения
+                            elif kind in ("compound", "union"):
+                                pass  # разрешаем
+                            else:
+                                continue
 
                         if var_size == 0 and symbol_size > 0:
                             var_size = symbol_size

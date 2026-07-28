@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: elfparser
-Version: 1.1.0
+Version: 1.3.0
 Summary: ELF BSS section inspector with DWARF parsing
 Author: Uneld
 Requires-Python: >=3.10
