@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elfparser"
-version = "1.1.0"
+version = "1.3.0"
 description = "ELF BSS section inspector with DWARF parsing"
 authors = [
     { name = "Uneld" }
