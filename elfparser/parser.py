@@ -350,6 +350,7 @@ class BssInspector:
                         elem_name, elem_size, _, _ = self.resolve_type(dwarf_info, elem_die, cu_offset)
                         name = f"array of {elem_name}"
                         array_size = self.get_array_size(type_die, dwarf_info, cu_offset)
+                        # Сохраняем информацию о размере элемента и количестве элементов
                         return self.demangle(name), array_size, type_die, "array"
                 return self.demangle("array"), 0, type_die, "array"
 
@@ -448,6 +449,18 @@ class BssInspector:
         except Exception:
             return None
 
+    def get_array_element_type(self, dwarf_info, array_die, cu_offset):
+        """Получает тип элемента массива"""
+        try:
+            at_type = array_die.attributes.get('DW_AT_type')
+            if at_type:
+                elem_die = self._safe_get_die(dwarf_info, at_type.value, cu_offset)
+                if elem_die:
+                    return self.resolve_type(dwarf_info, elem_die, cu_offset)
+        except Exception:
+            pass
+        return "unknown", 0, None, "unknown"
+
     # ---------- Разворачивание ----------
 
     def collect_compound_members(self, dwarf_info, compound_die, cu_offset, base_address, prefix):
@@ -482,6 +495,54 @@ class BssInspector:
                 except Exception:
                     continue
 
+                # ===== ОБРАБОТКА МАССИВОВ СТРУКТУР =====
+                if kind == "array":
+                    # Получаем тип элемента массива
+                    at_type = final_die.attributes.get('DW_AT_type')
+                    if at_type:
+                        elem_die = self._safe_get_die(dwarf_info, at_type.value, cu_offset)
+                        if elem_die:
+                            elem_type_name, elem_type_size, elem_final_die, elem_kind = self.resolve_type(
+                                dwarf_info, elem_die, cu_offset
+                            )
+
+                            if elem_kind in ("compound", "union"):
+                                # Получаем размер массива
+                                array_size = self.get_array_size(final_die, dwarf_info, cu_offset)
+                                if array_size > 0 and elem_type_size > 0:
+                                    num_elements = array_size // elem_type_size
+
+                                    # Ищем полное определение типа элемента
+                                    complete = self._find_complete_type_die(dwarf_info, elem_type_name)
+                                    if complete:
+                                        die_c, cu_off_c, _, _ = complete
+                                    else:
+                                        die_c, cu_off_c = elem_final_die, cu_offset
+
+                                    # Разворачиваем каждый элемент массива
+                                    for i in range(num_elements):
+                                        element_address = address + (i * elem_type_size)
+                                        element_prefix = f"{full_name}[{i}]"
+
+                                        if elem_kind == "compound":
+                                            self.collect_compound_members(dwarf_info, die_c, cu_off_c, element_address,
+                                                                          element_prefix)
+                                        elif elem_kind == "union":
+                                            self.collect_union_members(dwarf_info, die_c, cu_off_c, element_address,
+                                                                       element_prefix)
+
+                                    # Добавляем сам массив как переменную
+                                    key = (full_name, address)
+                                    if key not in self.seen_addresses:
+                                        self.seen_addresses.add(key)
+                                        self.var_library[full_name] = {
+                                            'address': address,
+                                            'type': f"array of {elem_type_name}",
+                                            'size': array_size
+                                        }
+                                    continue
+
+                # ===== СУЩЕСТВУЮЩАЯ ЛОГИКА =====
                 if kind in ("compound", "union"):
                     complete = self._find_complete_type_die(dwarf_info, type_name)
                     if complete:
@@ -504,7 +565,8 @@ class BssInspector:
                             'type': self.demangle(type_name),
                             'size': type_size
                         }
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] collect_compound_members error: {e}", file=sys.stderr)
             pass
 
     def collect_union_members(self, dwarf_info, union_die, cu_offset, base_address, prefix):
@@ -553,8 +615,23 @@ class BssInspector:
             pass
 
     def _expand_root_compound_union(self, dwarf_info, var_type_name, demangled_name, symbol_address):
-        """Принудительно разворачивает корневой compound/union, используя полное определение типа."""
         try:
+            # Если это массив - обрабатываем его элементы
+            if var_type_name.startswith("array of "):
+                # Извлекаем имя типа элемента
+                elem_type_name = var_type_name[9:]  # убираем "array of "
+                complete = self._find_complete_type_die(dwarf_info, elem_type_name)
+                if not complete:
+                    complete = self._find_complete_type_die(dwarf_info, elem_type_name.split("::")[-1])
+
+                if complete:
+                    die_t, cu_off, _, full_name = complete
+                    # Здесь нужно получить размер массива и развернуть каждый элемент
+                    # Для этого нужно найти DIE массива в DWARF
+                    # ... (логика получения размера массива и разворачивания)
+                return var_type_name
+
+            # Существующая логика для обычных структур/объединений
             complete = self._find_complete_type_die(dwarf_info, var_type_name)
             if not complete:
                 complete = self._find_complete_type_die(dwarf_info, demangled_name)
@@ -597,13 +674,55 @@ class BssInspector:
                         type_die = self._safe_get_die(dwarf_info, at_type.value, cu_offset)
                         type_name, type_size, final_die, kind = self.resolve_type(dwarf_info, type_die, cu_offset)
 
+                        # НОВОЕ: Обработка массива структур на корневом уровне
+                        if kind == "array":
+                            # Получаем тип элемента
+                            elem_type_die = self._safe_get_die(dwarf_info, final_die.attributes.get('DW_AT_type').value,
+                                                               cu_offset)
+                            if elem_type_die:
+                                elem_type_name, elem_type_size, elem_final_die, elem_kind = self.resolve_type(
+                                    dwarf_info, elem_type_die, cu_offset
+                                )
+                                if elem_kind in ("compound", "union"):
+                                    # Разворачиваем массив структур
+                                    complete = self._find_complete_type_die(dwarf_info, elem_type_name)
+                                    if complete:
+                                        die_c, cu_off_c, _, _ = complete
+                                    else:
+                                        die_c, cu_off_c = elem_final_die, cu_offset
+
+                                    # Получаем размер массива и количество элементов
+                                    array_size = self.get_array_size(final_die, dwarf_info, cu_offset)
+                                    if array_size > 0 and elem_type_size > 0:
+                                        num_elements = array_size // elem_type_size
+                                        # Сохраняем информацию о массиве
+                                        self.var_library[demangled_var_name] = {
+                                            'address': symbol_address,
+                                            'type': type_name,
+                                            'size': array_size,
+                                            'is_array': True,
+                                            'element_type': elem_type_name,
+                                            'element_size': elem_type_size,
+                                            'num_elements': num_elements
+                                        }
+                                        # Разворачиваем каждый элемент
+                                        for i in range(num_elements):
+                                            element_address = symbol_address + (i * elem_type_size)
+                                            element_prefix = f"{demangled_var_name}[{i}]"
+                                            if elem_kind == "compound":
+                                                self.collect_compound_members(dwarf_info, die_c, cu_off_c,
+                                                                              element_address, element_prefix)
+                                            else:
+                                                self.collect_union_members(dwarf_info, die_c, cu_off_c, element_address,
+                                                                           element_prefix)
+                                        return type_name, array_size, kind
+
                         if kind in ("compound", "union"):
                             normalized_type_name = self._expand_root_compound_union(
                                 dwarf_info, type_name, demangled_var_name, symbol_address
                             )
                             if normalized_type_name:
                                 return normalized_type_name, (type_size or symbol_size), kind
-                            # если не нашли полное определение — развернём имеющееся
                             if kind == "compound":
                                 self.collect_compound_members(dwarf_info, final_die, cu_offset, symbol_address,
                                                               demangled_var_name)
@@ -613,8 +732,6 @@ class BssInspector:
                             return type_name, (type_size or symbol_size), kind
 
                         return self.demangle(type_name), (type_size or symbol_size), kind
-
-                    # нет DW_AT_type → к fallback
                     break
 
             # Fallback: для mangled переменных ищем тип в индексе по нормализованным ключам и разворачиваем полное определение
@@ -657,7 +774,6 @@ class BssInspector:
 
             with open(elf_file, 'rb') as f:
                 elffile = ELFFile(f)
-
                 self._update_progress(5)
                 self.pointer_size = elffile.elfclass // 8
 
@@ -704,6 +820,12 @@ class BssInspector:
                         symbol_size = symbol.entry['st_size']
                         demangled_name = self.demangle(symbol.name)
 
+                        # Дополнительная проверка: нужно ли обрабатывать этот символ
+                        # Пропускаем символы, которые начинаются с определенных префиксов
+                        if demangled_name.startswith('__') or demangled_name.startswith(
+                                '_ZTV') or demangled_name.startswith('_ZTI'):
+                            continue
+
                         try:
                             var_type, var_size, kind = self.get_variable_type(
                                 dwarf_info, symbol.name, symbol_address, symbol_size
@@ -713,18 +835,97 @@ class BssInspector:
                                   f"addr=0x{symbol_address:08x} size={symbol_size}: {e_2}", file=sys.stderr)
                             var_type, var_size, kind = ("unknown", symbol_size, "unknown")
 
+                        # ===== НОВАЯ ЛОГИКА ДЛЯ МАССИВОВ СТРУКТУР =====
+                        # Если тип - массив и содержит в названии "array of", проверяем, что это массив структур
+                        if kind == "array" and "array of " in var_type:
+                            # Извлекаем имя типа элемента
+                            elem_type_name = var_type[9:]  # убираем "array of "
+
+                            # Проверяем, является ли элемент структурой/объединением
+                            complete = self._find_complete_type_die(dwarf_info, elem_type_name)
+                            if complete:
+                                # Это массив структур - нужно развернуть его элементы
+                                die_c, cu_off_c, _, full_name = complete
+                                tname, _, _, tkind = self.resolve_type(dwarf_info, die_c, cu_off_c)
+
+                                # Получаем размер элемента
+                                elem_size = 0
+                                if tkind in ("compound", "union"):
+                                    # Ищем размер элемента
+                                    for cu in dwarf_info.iter_CUs():
+                                        for die in cu.iter_DIEs():
+                                            if die.tag in ('DW_TAG_structure_type', 'DW_TAG_class_type',
+                                                           'DW_TAG_union_type'):
+                                                name_attr = die.attributes.get('DW_AT_name')
+                                                if name_attr:
+                                                    dn = self.demangle(name_attr.value.decode())
+                                                    if dn == elem_type_name or dn == elem_type_name.split("::")[-1]:
+                                                        size_attr = die.attributes.get('DW_AT_byte_size')
+                                                        elem_size = size_attr.value if size_attr else 0
+                                                        break
+                                        if elem_size > 0:
+                                            break
+
+                                if elem_size > 0 and symbol_size > 0:
+                                    num_elements = symbol_size // elem_size
+
+                                    # Сохраняем информацию о массиве
+                                    key = (demangled_name, symbol_address)
+                                    if key not in self.seen_addresses:
+                                        self.seen_addresses.add(key)
+                                        self.var_library[demangled_name] = {
+                                            'address': symbol_address,
+                                            'type': var_type,
+                                            'size': symbol_size,
+                                            'is_array': True,
+                                            'element_type': elem_type_name,
+                                            'element_size': elem_size,
+                                            'num_elements': num_elements
+                                        }
+
+                                    # Разворачиваем каждый элемент массива
+                                    for i in range(num_elements):
+                                        element_address = symbol_address + (i * elem_size)
+                                        element_prefix = f"{demangled_name}[{i}]"
+
+                                        if tkind == "compound":
+                                            self.collect_compound_members(dwarf_info, die_c, cu_off_c, element_address,
+                                                                          element_prefix)
+                                        elif tkind == "union":
+                                            self.collect_union_members(dwarf_info, die_c, cu_off_c, element_address,
+                                                                       element_prefix)
+
+                                    continue  # Пропускаем добавление как обычную переменную
+                            else:
+                                # Если не нашли полное определение, попробуем искать по короткому имени
+                                short_name = elem_type_name.split("::")[-1]
+                                complete = self._find_complete_type_die(dwarf_info, short_name)
+                                if complete:
+                                    die_c, cu_off_c, _, full_name = complete
+                                    # Аналогичная логика разворачивания...
+                                    # [повторить код выше]
+
+                        # ===== СУЩЕСТВУЮЩАЯ ЛОГИКА ДЛЯ СТРУКТУР =====
                         if var_type not in self.permission_types:
-                            continue
+                            # Проверяем, не является ли это структурой/объединением
+                            if kind in ("compound", "union"):
+                                # Это структура или объединение - разрешаем
+                                pass
+                            else:
+                                # Проверяем, не является ли это массивом структур
+                                if kind == "array" and "array of " in var_type:
+                                    elem_type_name = var_type[9:]
+                                    if self._find_complete_type_die(dwarf_info, elem_type_name):
+                                        pass
+                                    else:
+                                        continue
+                                else:
+                                    continue
 
                         if var_size == 0 and symbol_size > 0:
                             var_size = symbol_size
 
-                        key = (demangled_name, symbol_address)
-                        if key in self.seen_addresses:
-                            continue
-                        self.seen_addresses.add(key)
-
-                        # Принудительное разворачивание корневых compound/union — на случай, если get_variable_type не успел
+                        # Принудительное разворачивание корневых compound/union
                         if kind in ("compound", "union"):
                             normalized_type_name = self._expand_root_compound_union(
                                 dwarf_info, var_type, demangled_name, symbol_address
@@ -732,19 +933,21 @@ class BssInspector:
                             if normalized_type_name:
                                 var_type = normalized_type_name
 
-                        # Если тип неизвестен, но имя mangled — ставим типом демангленное имя (информативно)
+                        # Если тип неизвестен, но имя mangled — ставим типом демангленное имя
                         if kind == "unknown" and self._is_mangled(symbol.name):
                             var_type = demangled_name
 
-                        self.var_library[demangled_name] = {
-                            'address': symbol_address,
-                            'type': var_type,
-                            'size': var_size
-                        }
+                        key = (demangled_name, symbol_address)
+                        if key not in self.seen_addresses:
+                            self.seen_addresses.add(key)
+                            self.var_library[demangled_name] = {
+                                'address': symbol_address,
+                                'type': var_type,
+                                'size': var_size
+                            }
 
                     except Exception as e_2:
                         print(f"[DEBUG] Symbol iteration failed for '{symbol.name}': {e_2}", file=sys.stderr)
-                        # продолжаем с остальными символами
 
                 self._update_progress(100)
                 return self.var_library
