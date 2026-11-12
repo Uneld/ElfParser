@@ -87,6 +87,7 @@ class BssInspector:
         self._complete_type_cache = {}
         self._member_cache = {}
         self._variable_dies_cache = {}
+        self._variable_addr_cache = {}
 
     @staticmethod
     def _is_mangled(name: str) -> bool:
@@ -147,7 +148,9 @@ class BssInspector:
 
     @staticmethod
     def _names_match(dwarf_name: str, demangled_var_name: str) -> bool:
-        return dwarf_name == demangled_var_name or demangled_var_name.endswith(dwarf_name)
+        # Точное совпадение или последний компонент с квалификатором Namespace::
+        # Голый endswith() давал ложные срабатывания: "tstEqualizerKi".endswith("i").
+        return dwarf_name == demangled_var_name or demangled_var_name.endswith("::" + dwarf_name)
 
     def _update_progress(self, value):
         if self.progress_callback and callable(self.progress_callback):
@@ -436,25 +439,83 @@ class BssInspector:
                     add_entry(key_short, die, cu_offset, size, full_name)
 
     def _build_variable_dies_index(self, dwarf_info):
-        """Создает индекс DIE переменных для быстрого доступа."""
+        """Создает индексы DIE переменных: по имени и по адресу из DW_AT_location."""
         if dwarf_info in self._variable_dies_cache:
             return self._variable_dies_cache[dwarf_info]
 
+        if self._expr_parser is None:
+            self._expr_parser = DWARFExprParser(dwarf_info.structs)
+
         variable_dies = {}
+        addr_dies = {}
         for CU in dwarf_info.iter_CUs():
             cu_offset = CU.cu_offset
             for die in CU.iter_DIEs():
-                if die.tag == 'DW_TAG_variable':
-                    name_attr = die.attributes.get('DW_AT_name')
-                    if name_attr:
-                        try:
-                            name = name_attr.value.decode()
-                            variable_dies[name] = (die, cu_offset)
-                        except:
-                            pass
+                if die.tag != 'DW_TAG_variable':
+                    continue
+
+                name_attr = die.attributes.get('DW_AT_name')
+                if name_attr:
+                    try:
+                        name = name_attr.value.decode()
+                        variable_dies.setdefault(name, []).append((die, cu_offset))
+                    except Exception:
+                        pass
+
+                address = self._variable_location_address(die)
+                if address is not None:
+                    addr_dies.setdefault(address, []).append((die, cu_offset))
 
         self._variable_dies_cache[dwarf_info] = variable_dies
+        self._variable_addr_cache[dwarf_info] = addr_dies
         return variable_dies
+
+    def _variable_location_address(self, die):
+        """Возвращает адрес переменной из DW_AT_location (DW_OP_addr) или None."""
+        try:
+            attr = die.attributes.get('DW_AT_location')
+            if attr is None or getattr(attr, 'form', None) != 'DW_FORM_exprloc':
+                return None
+            if self._expr_parser is None:
+                return None
+            for op in self._expr_parser.parse_expr(attr.value):
+                if op.op_name == 'DW_OP_addr' and len(op.args) == 1:
+                    return int(op.args[0])
+        except Exception:
+            pass
+        return None
+
+    def _pick_variable_die(self, entries, demangled_var_name):
+        """Выбирает DIE среди кандидатов с одинаковым адресом (по имени, иначе первый)."""
+        if not entries:
+            return None
+        if len(entries) == 1:
+            return entries[0]
+
+        for die, cu_offset in entries:
+            name_attr = die.attributes.get('DW_AT_name')
+            if not name_attr:
+                continue
+            try:
+                dwarf_name = name_attr.value.decode()
+            except Exception:
+                continue
+            if self._names_match(dwarf_name, demangled_var_name):
+                return die, cu_offset
+
+        return entries[0]
+
+    def _find_variable_die(self, variable_dies, demangled_var_name):
+        """Ищет DIE по имени: сначала точное совпадение, затем Namespace::name."""
+        entries = variable_dies.get(demangled_var_name)
+        if entries:
+            return entries[0]
+
+        for dwarf_name, candidates in variable_dies.items():
+            if self._names_match(dwarf_name, demangled_var_name):
+                return candidates[0]
+
+        return None
 
     def _find_complete_type_die(self, dwarf_info, name_full_or_short):
         """Ищет полное определение типа с кешированием."""
@@ -876,69 +937,91 @@ class BssInspector:
         except Exception:
             return None
 
+    def _resolve_variable_die_type(self, dwarf_info, die, cu_offset, demangled_var_name,
+                                   symbol_address, symbol_size):
+        """Разрешает тип конкретного DIE переменной и разворачивает compound/union."""
+        at_type = die.attributes.get('DW_AT_type')
+        if not at_type:
+            return None
+
+        type_die = self._safe_get_die(dwarf_info, at_type.value, cu_offset)
+        if type_die is None:
+            return None
+
+        type_name, type_size, final_die, kind = self.resolve_type(dwarf_info, type_die, cu_offset)
+
+        # Обработка массива структур на корневом уровне
+        if kind == "array":
+            at_type = final_die.attributes.get('DW_AT_type')
+            if at_type:
+                elem_type_die = self._safe_get_die(dwarf_info, at_type.value, cu_offset)
+                if elem_type_die:
+                    elem_type_name, elem_type_size, elem_final_die, elem_kind = self.resolve_type(
+                        dwarf_info, elem_type_die, cu_offset
+                    )
+                    if elem_kind in ("compound", "union"):
+                        complete = self._find_complete_type_die(dwarf_info, elem_type_name)
+                        if complete:
+                            die_c, cu_off_c, _, _ = complete
+                        else:
+                            die_c, cu_off_c = elem_final_die, cu_offset
+
+                        array_size = self.get_array_size(final_die, dwarf_info, cu_offset)
+                        if array_size > 0 and elem_type_size > 0:
+                            num_elements = array_size // elem_type_size
+                            # Не добавляем сам массив, только разворачиваем элементы
+                            for i in range(num_elements):
+                                element_address = symbol_address + (i * elem_type_size)
+                                element_prefix = f"{demangled_var_name}[{i}]"
+                                if elem_kind == "compound":
+                                    self.collect_compound_members(dwarf_info, die_c, cu_off_c,
+                                                                  element_address, element_prefix)
+                                else:
+                                    self.collect_union_members(dwarf_info, die_c, cu_off_c,
+                                                               element_address, element_prefix)
+                            return type_name, array_size, kind
+
+        if kind in ("compound", "union"):
+            normalized_type_name = self._expand_root_compound_union(
+                dwarf_info, type_name, demangled_var_name, symbol_address
+            )
+            if normalized_type_name:
+                return normalized_type_name, (type_size or symbol_size), kind
+            if kind == "compound":
+                self.collect_compound_members(dwarf_info, final_die, cu_offset, symbol_address,
+                                              demangled_var_name)
+            else:
+                self.collect_union_members(dwarf_info, final_die, cu_offset, symbol_address,
+                                           demangled_var_name)
+            return type_name, (type_size or symbol_size), kind
+
+        return self.demangle(type_name), (type_size or symbol_size), kind
+
     def get_variable_type(self, dwarf_info, variable_name, symbol_address, symbol_size):
         """Определяет тип переменной."""
         demangled_var_name = self.demangle(variable_name)
 
         try:
             variable_dies = self._build_variable_dies_index(dwarf_info)
+            addr_dies = self._variable_addr_cache.get(dwarf_info, {})
 
-            # Ищем переменную в индексе
-            for dwarf_name, (die, cu_offset) in variable_dies.items():
-                if not self._names_match(dwarf_name, demangled_var_name):
-                    continue
+            # 1. По адресу из DW_AT_location — самый надежный способ
+            entry = self._pick_variable_die(addr_dies.get(symbol_address), demangled_var_name)
+            if entry is not None:
+                resolved = self._resolve_variable_die_type(
+                    dwarf_info, entry[0], entry[1], demangled_var_name, symbol_address, symbol_size
+                )
+                if resolved is not None:
+                    return resolved
 
-                at_type = die.attributes.get('DW_AT_type')
-                if at_type:
-                    type_die = self._safe_get_die(dwarf_info, at_type.value, cu_offset)
-                    type_name, type_size, final_die, kind = self.resolve_type(dwarf_info, type_die, cu_offset)
-
-                    # Обработка массива структур на корневом уровне
-                    if kind == "array":
-                        elem_type_die = self._safe_get_die(dwarf_info, final_die.attributes.get('DW_AT_type').value,
-                                                           cu_offset)
-                        if elem_type_die:
-                            elem_type_name, elem_type_size, elem_final_die, elem_kind = self.resolve_type(
-                                dwarf_info, elem_type_die, cu_offset
-                            )
-                            if elem_kind in ("compound", "union"):
-                                complete = self._find_complete_type_die(dwarf_info, elem_type_name)
-                                if complete:
-                                    die_c, cu_off_c, _, _ = complete
-                                else:
-                                    die_c, cu_off_c = elem_final_die, cu_offset
-
-                                array_size = self.get_array_size(final_die, dwarf_info, cu_offset)
-                                if array_size > 0 and elem_type_size > 0:
-                                    num_elements = array_size // elem_type_size
-                                    # Не добавляем сам массив, только разворачиваем элементы
-                                    for i in range(num_elements):
-                                        element_address = symbol_address + (i * elem_type_size)
-                                        element_prefix = f"{demangled_var_name}[{i}]"
-                                        if elem_kind == "compound":
-                                            self.collect_compound_members(dwarf_info, die_c, cu_off_c,
-                                                                          element_address, element_prefix)
-                                        else:
-                                            self.collect_union_members(dwarf_info, die_c, cu_off_c,
-                                                                       element_address, element_prefix)
-                                    return type_name, array_size, kind
-
-                    if kind in ("compound", "union"):
-                        normalized_type_name = self._expand_root_compound_union(
-                            dwarf_info, type_name, demangled_var_name, symbol_address
-                        )
-                        if normalized_type_name:
-                            return normalized_type_name, (type_size or symbol_size), kind
-                        if kind == "compound":
-                            self.collect_compound_members(dwarf_info, final_die, cu_offset, symbol_address,
-                                                          demangled_var_name)
-                        else:
-                            self.collect_union_members(dwarf_info, final_die, cu_offset, symbol_address,
-                                                       demangled_var_name)
-                        return type_name, (type_size or symbol_size), kind
-
-                    return self.demangle(type_name), (type_size or symbol_size), kind
-                break
+            # 2. По имени: сначала точное, затем квалифицированное (Namespace::name)
+            entry = self._find_variable_die(variable_dies, demangled_var_name)
+            if entry is not None:
+                resolved = self._resolve_variable_die_type(
+                    dwarf_info, entry[0], entry[1], demangled_var_name, symbol_address, symbol_size
+                )
+                if resolved is not None:
+                    return resolved
 
             # Fallback
             if self._is_mangled(variable_name):
@@ -1121,6 +1204,7 @@ class BssInspector:
         self._complete_type_cache.clear()
         self._member_cache.clear()
         self._variable_dies_cache.clear()
+        self._variable_addr_cache.clear()
 
     @staticmethod
     def build_flash_image_with_global_align(elf_file_path: str, align_pattern: AlignPattern = AlignPattern.ZERO):
