@@ -1,14 +1,20 @@
 Metadata-Version: 2.4
 Name: elfparser
-Version: 1.4.0
+Version: 1.4.1
 Summary: ELF BSS section inspector with DWARF parsing
 Author: Uneld
+License-Expression: MIT
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Operating System :: OS Independent
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 License-File: LICENSE.txt
 Requires-Dist: pyelftools
 Dynamic: license-file
-Dynamic: requires-python
 
 # 🇷🇺 Русская версия
 
